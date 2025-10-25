@@ -1,0 +1,113 @@
+/* Design System Variables */
+:root {
+  --primary-teal: #21808D;
+  --background-cream: #FCFCF9;
+  --text-charcoal: #1F2121;
+  --shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+  --border-radius: 10px;
+}
+
+/* Global Styles */
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: 'Arial', sans-serif;
+  background-color: var(--background-cream);
+  color: var(--text-charcoal);
+  line-height: 1.6;
+}
+
+.App {
+  min-height: 100vh;
+}
+
+/* Route transition */
+.route-fade {
+  animation: routeFade .2s ease;
+}
+
+@keyframes routeFade {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* Sidebar layout spacing */
+.with-sidebar {
+  padding-top: 60px; /* space for mobile toggle overlap */
+}
+
+@media (min-width: 768px) {
+  .with-sidebar {
+    margin-left: 240px; /* sidebar width */
+    padding-top: 16px;
+  }
+}
+
+/* Card Component */
+.card {
+  background-color: white;
+  border-radius: var(--border-radius);
+  box-shadow: var(--shadow);
+  padding: 20px;
+  margin: 10px;
+}
+
+/* Button Styles */
+.btn {
+  background-color: var(--primary-teal);
+  color: white;
+  border: none;
+  padding: 10px 20px;
+  border-radius: 5px;
+  cursor: pointer;
+  font-size: 16px;
+  transition: background-color 0.3s ease;
+}
+
+.btn:hover {
+  background-color: #1a6b7a; /* Darker teal */
+}
+
+.btn:disabled {
+  background-color: #ccc;
+  cursor: not-allowed;
+}
+
+/* Responsive Grid Layout for Task Cards */
+.task-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  gap: 20px;
+  padding: 20px;
+}
+
+/* Mobile-Responsive Breakpoints */
+@media (max-width: 768px) {
+  .task-grid {
+    grid-template-columns: 1fr;
+    padding: 10px;
+  }
+
+  .card {
+    padding: 15px;
+    margin: 5px;
+  }
+
+  .btn {
+    width: 100%;
+    padding: 12px;
+  }
+}
+
+@media (max-width: 480px) {
+  body {
+    font-size: 14px;
+  }
+
+  .card {
+    padding: 10px;
+  }
+}
