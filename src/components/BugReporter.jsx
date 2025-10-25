@@ -1,9 +1,9 @@
 import React, { useState, useEffect } from 'react';
-import { collection, addDoc, onSnapshot } from 'firebase/firestore';
+import { collection, addDoc, onSnapshot, query, where } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { db, storage, auth } from '../firebase';
 
-const BugReporter = () => {
+const BugReporter = ({ projectId }) => {
   const [form, setForm] = useState({
     title: '',
     description: '',
@@ -15,12 +15,14 @@ const BugReporter = () => {
   const [uploading, setUploading] = useState(false);
 
   useEffect(() => {
-    const unsubscribe = onSnapshot(collection(db, 'bugs'), (snapshot) => {
+    const base = collection(db, 'bugs');
+    const q = projectId ? query(base, where('projectId', '==', projectId)) : base;
+    const unsubscribe = onSnapshot(q, (snapshot) => {
       const bugsData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
       setBugs(bugsData);
     });
     return unsubscribe;
-  }, []);
+  }, [projectId]);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -42,7 +44,8 @@ const BugReporter = () => {
       status: 'Open',
       browserInfo: navigator.userAgent,
       timestamp: new Date(),
-      userEmail: auth.currentUser?.email || 'Anonymous'
+      userEmail: auth.currentUser?.email || 'Anonymous',
+      ...(projectId ? { projectId } : {})
     };
 
     await addDoc(collection(db, 'bugs'), bugData);

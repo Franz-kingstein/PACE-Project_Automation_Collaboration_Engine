@@ -111,3 +111,21 @@ body {
     padding: 10px;
   }
 }
+
+/* Kanban / DnD styles */
+.kanban-board {
+  align-items: flex-start;
+}
+.kanban-column {
+  border: 1px solid #eee;
+  transition: box-shadow .15s ease, border-color .15s ease;
+}
+.kanban-column.is-over {
+  border-color: var(--primary-teal);
+  box-shadow: 0 0 0 2px rgba(33,128,141,0.15) inset;
+}
+.dnd-card.dragging {
+  opacity: .85;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.18);
+  cursor: grabbing;
+}

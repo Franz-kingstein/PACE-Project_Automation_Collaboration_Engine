@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { collection, addDoc, onSnapshot, query, orderBy } from 'firebase/firestore';
+import { collection, addDoc, onSnapshot, query, orderBy, where } from 'firebase/firestore';
 import { db, auth } from '../firebase';
 
-const Chat = () => {
+const Chat = ({ projectId }) => {
   const [messages, setMessages] = useState([]);
   const [newMessage, setNewMessage] = useState('');
   const messagesEndRef = useRef(null);
@@ -12,14 +12,17 @@ const Chat = () => {
   };
 
   useEffect(() => {
-    const q = query(collection(db, 'messages'), orderBy('timestamp', 'asc'));
+    const base = collection(db, 'messages');
+    const q = projectId
+      ? query(base, where('projectId', '==', projectId), orderBy('timestamp', 'asc'))
+      : query(base, orderBy('timestamp', 'asc'));
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const messagesData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
       setMessages(messagesData);
       scrollToBottom();
     });
     return unsubscribe;
-  }, []);
+  }, [projectId]);
 
   const handleSendMessage = async (e) => {
     e.preventDefault();
@@ -33,7 +36,8 @@ const Chat = () => {
       userId: user.uid,
       userName: user.displayName || 'Anonymous',
       userPhotoURL: user.photoURL || '/default-avatar.png',
-      timestamp: new Date()
+      timestamp: new Date(),
+      ...(projectId ? { projectId } : {})
     });
     setNewMessage('');
   };

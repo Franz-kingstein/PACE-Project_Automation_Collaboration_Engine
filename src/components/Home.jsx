@@ -10,7 +10,11 @@ import {
   addDoc,
   updateDoc,
   doc,
+  getDoc,
+  setDoc,
+  arrayUnion,
   serverTimestamp,
+  deleteField,
 } from 'firebase/firestore';
 import { Bar } from 'react-chartjs-2';
 import {
@@ -46,6 +50,15 @@ function formatDate(date) {
 
 function isSameDay(a, b) {
   return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+}
+
+function normalizeStatus(s) {
+  if (!s) return '';
+  const t = String(s).toLowerCase();
+  if (t.includes('in progress') || t.replace(/\s+/g,'') === 'inprogress') return 'in progress';
+  if (t.includes('to do') || t.replace(/\s+/g,'') === 'todo') return 'to do';
+  if (t.includes('done') || t.includes('complete')) return 'done';
+  return t;
 }
 
 const LoadingSkeleton = ({ height = 120 }) => (
@@ -87,6 +100,9 @@ const Home = () => {
   const [toast, setToast] = useState('');
 
   const [newProject, setNewProject] = useState({ name: '', description: '', members: '' });
+  const [showJoinModal, setShowJoinModal] = useState(false);
+  const [joinCode, setJoinCode] = useState('');
+  const [personalNote, setPersonalNote] = useState('');
 
   useEffect(() => {
     const unsubAuth = onAuthStateChanged(auth, (u) => {
@@ -101,6 +117,13 @@ const Home = () => {
   useEffect(() => {
     if (!user) return;
     setError('');
+    // load personal note
+    const userDocRef = doc(db, 'users', user.uid);
+    const unsubUser = onSnapshot(userDocRef, (snap) => {
+      if (snap.exists()) {
+        setPersonalNote(snap.data().personalNote || '');
+      }
+    });
     const ownerQ = query(collection(db, 'projects'), where('ownerEmail', '==', user.email || '')); 
     const memberQ = query(collection(db, 'projects'), where('members', 'array-contains', user.email || ''));
 
@@ -123,29 +146,69 @@ const Home = () => {
       mergeAndSet();
     }, (e) => setError(e.message));
 
-    return () => { unsub1(); unsub2(); };
+  return () => { unsub1(); unsub2(); unsubUser && unsubUser(); };
   }, [user]);
 
-  // Listen to tasks assigned to user across projects
+  // Backfill: ensure tasks with status done have completedAt set
+  useEffect(() => {
+    const toBackfill = tasks.filter(t => normalizeStatus(t.status) === 'done' && !t.completedAt);
+    if (!toBackfill.length) return;
+    // limit write burst to avoid excessive updates
+    toBackfill.slice(0, 20).forEach(async (t) => {
+      try {
+        await updateDoc(doc(db, 'tasks', t.id), { completedAt: serverTimestamp() });
+      } catch (e) {
+        // ignore backfill errors silently to avoid user disruption
+      }
+    });
+  }, [tasks]);
+
+  // Listen to tasks assigned to user across projects (supports assigneeId, assigneeEmail, and legacy assignee)
   useEffect(() => {
     if (!user) return;
-    const qTasks = query(
-      collection(db, 'tasks'),
-      where('assignee', '==', user.email || ''),
-      orderBy('dueDate', 'asc')
-    );
-    const unsub = onSnapshot(qTasks, (snap) => {
-      const data = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-      setTasks(data);
+    const tasksCol = collection(db, 'tasks');
+    const qById = query(tasksCol, where('assigneeId', '==', user.uid || ''), orderBy('dueDate', 'asc'));
+    const qByEmail = query(tasksCol, where('assigneeEmail', '==', user.email || ''), orderBy('dueDate', 'asc'));
+    const qLegacy = query(tasksCol, where('assignee', '==', user.email || ''), orderBy('dueDate', 'asc'));
+    const seen = new Map();
+    const mergeAndSet = () => setTasks(Array.from(seen.values()).sort((a, b) => {
+      const ad = a.dueDate ? (a.dueDate.seconds ? a.dueDate.seconds * 1000 : a.dueDate) : Infinity;
+      const bd = b.dueDate ? (b.dueDate.seconds ? b.dueDate.seconds * 1000 : b.dueDate) : Infinity;
+      return ad - bd;
+    }));
+    const unsub1 = onSnapshot(qById, (snap) => {
+      snap.docChanges().forEach((ch) => {
+        if (ch.type === 'removed') seen.delete(ch.doc.id);
+        else seen.set(ch.doc.id, { id: ch.doc.id, ...ch.doc.data() });
+      });
+      mergeAndSet();
     }, (e) => setError(e.message));
-    return unsub;
+    const unsub2 = onSnapshot(qByEmail, (snap) => {
+      snap.docChanges().forEach((ch) => {
+        if (ch.type === 'removed') seen.delete(ch.doc.id);
+        else seen.set(ch.doc.id, { id: ch.doc.id, ...ch.doc.data() });
+      });
+      mergeAndSet();
+    }, (e) => setError(e.message));
+    const unsub3 = onSnapshot(qLegacy, (snap) => {
+      snap.docChanges().forEach((ch) => {
+        if (ch.type === 'removed') seen.delete(ch.doc.id);
+        else seen.set(ch.doc.id, { id: ch.doc.id, ...ch.doc.data() });
+      });
+      mergeAndSet();
+    }, (e) => setError(e.message));
+    return () => { unsub1(); unsub2(); unsub3(); };
   }, [user]);
 
-  const toDoCount = useMemo(() => tasks.filter(t => (t.status || '').toLowerCase() === 'to do').length, [tasks]);
-  const inProgressCount = useMemo(() => tasks.filter(t => (t.status || '').toLowerCase() === 'in progress').length, [tasks]);
+  const toDoCount = useMemo(() => tasks.filter(t => normalizeStatus(t.status) === 'to do').length, [tasks]);
+  const inProgressCount = useMemo(() => tasks.filter(t => normalizeStatus(t.status) === 'in progress').length, [tasks]);
   const completedToday = useMemo(() => {
     const today = new Date();
-    return tasks.filter(t => t.completedAt && isSameDay(new Date(t.completedAt.seconds ? t.completedAt.seconds * 1000 : t.completedAt), today)).length;
+    const isCompletedToday = (t) => {
+      const ts = t.completedAt ? new Date(t.completedAt.seconds ? t.completedAt.seconds * 1000 : t.completedAt) : (t.completedAtClient ? new Date(t.completedAtClient) : null);
+      return ts ? isSameDay(ts, today) : false;
+    };
+    return tasks.filter(isCompletedToday).length;
   }, [tasks]);
 
   const weekMessageCount = useMemo(() => {
@@ -162,7 +225,7 @@ const Home = () => {
       const pid = t.projectId || 'unknown';
       if (!map[pid]) map[pid] = { total: 0, done: 0 };
       map[pid].total += 1;
-      if ((t.status || '').toLowerCase() === 'done') map[pid].done += 1;
+      if (normalizeStatus(t.status) === 'done') map[pid].done += 1;
     }
     return map;
   }, [tasks]);
@@ -183,8 +246,10 @@ const Home = () => {
                    const d = new Date(t.dueDate.seconds ? t.dueDate.seconds * 1000 : t.dueDate);
                    return d >= startOfToday && d < endOfWeek;
                  });
+    } else if (activeTab === 'inprogress') {
+      list = list.filter(t => normalizeStatus(t.status) === 'in progress');
     } else if (activeTab === 'overdue') {
-      list = list.filter(t => t.dueDate && new Date(t.dueDate.seconds ? t.dueDate.seconds * 1000 : t.dueDate) < startOfToday && (t.status || '').toLowerCase() !== 'done');
+      list = list.filter(t => t.dueDate && new Date(t.dueDate.seconds ? t.dueDate.seconds * 1000 : t.dueDate) < startOfToday && normalizeStatus(t.status) !== 'done');
     }
 
     // sort by due date
@@ -206,11 +271,11 @@ const Home = () => {
     start.setDate(now.getDate() - 6); // include today
 
     tasks.forEach(t => {
-      if (t.completedAt) {
-        const d = new Date(t.completedAt.seconds ? t.completedAt.seconds * 1000 : t.completedAt);
-        if (d >= start) {
-          counts[d.getDay()] += 1;
-        }
+      const d = t.completedAt
+        ? new Date(t.completedAt.seconds ? t.completedAt.seconds * 1000 : t.completedAt)
+        : (t.completedAtClient ? new Date(t.completedAtClient) : null);
+      if (d && d >= start) {
+        counts[d.getDay()] += 1;
       }
     });
 
@@ -243,10 +308,56 @@ const Home = () => {
     },
   };
 
+  const handleJoinProject = async (e) => {
+    e.preventDefault();
+    setError('');
+    if (!joinCode) return setError('Enter project ID or invitation link.');
+    try {
+      let projId = joinCode.trim();
+      const maybeUrl = (() => {
+        try { return new URL(projId); } catch { return null; }
+      })();
+      if (maybeUrl) {
+        const parts = maybeUrl.pathname.split('/').filter(Boolean);
+        projId = parts[parts.length - 1];
+      }
+
+      const projRef = doc(db, 'projects', projId);
+      const snap = await getDoc(projRef);
+      if (!snap.exists()) return setError('Project not found. Check the ID or link.');
+
+      await updateDoc(projRef, {
+        members: arrayUnion(user.email),
+        updatedAt: serverTimestamp()
+      });
+      setShowJoinModal(false);
+      setJoinCode('');
+      setToast('Joined project successfully');
+      setTimeout(() => setToast(''), 2000);
+    } catch (e) {
+      setError(e.message);
+    }
+  };
+
+  const savePersonalNote = async (value) => {
+    if (!user) return;
+    try {
+      await setDoc(doc(db, 'users', user.uid), { personalNote: value }, { merge: true });
+      setToast('Note saved');
+      setTimeout(() => setToast(''), 1200);
+    } catch (e) {
+      setError(e.message);
+    }
+  };
+
   const markTaskComplete = async (task) => {
     try {
-      await updateDoc(doc(db, 'tasks', task.id), { status: 'done', completedAt: serverTimestamp() });
-      setToast('Task marked as complete');
+      const isDone = normalizeStatus(task.status) === 'done';
+      const payload = isDone
+        ? { status: 'to do', completedAt: deleteField() }
+        : { status: 'done', completedAt: serverTimestamp() };
+      await updateDoc(doc(db, 'tasks', task.id), payload);
+      setToast(isDone ? 'Task set to To Do' : 'Task marked as complete');
       setTimeout(() => setToast(''), 1500);
     } catch (e) {
       setError(e.message);
@@ -316,6 +427,7 @@ const Home = () => {
           <button className="btn" onClick={() => setShowProjectModal(true)}>Create New Project</button>
           <button className="btn" style={{ background: '#1a6b7a' }} onClick={() => navigate('/tasks')}>Add Task</button>
           <button className="btn" style={{ background: '#1a6b7a' }} onClick={() => navigate('/profile')}>Invite Member</button>
+          <button className="btn" style={{ background: '#21808D' }} onClick={() => setShowJoinModal(true)}>Join Project</button>
         </div>
       </div>
 
@@ -399,6 +511,7 @@ const Home = () => {
               { key: 'all', label: 'All Tasks' },
               { key: 'today', label: 'Today' },
               { key: 'week', label: 'This Week' },
+              { key: 'inprogress', label: 'In Progress' },
               { key: 'overdue', label: 'Overdue' },
             ].map(t => (
               <button key={t.key} onClick={() => setActiveTab(t.key)} style={{
@@ -431,7 +544,7 @@ const Home = () => {
                 const priorityColor = priority === 'high' ? '#EF4444' : priority === 'medium' ? '#F59E0B' : '#10B981';
                 return (
                   <li key={task.id} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 0', borderBottom: '1px solid #F3F4F6' }}>
-                    <input type="checkbox" checked={(task.status || '').toLowerCase() === 'done'} onChange={() => markTaskComplete(task)} />
+                    <input type="checkbox" checked={normalizeStatus(task.status) === 'done' || !!task.completedAt || !!task.completedAtClient} onChange={() => markTaskComplete(task)} />
                     <div style={{ flex: 1 }}>
                       <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                         <span style={{ width: 8, height: 8, borderRadius: 999, background: priorityColor, display: 'inline-block' }} />
@@ -483,7 +596,41 @@ const Home = () => {
         </div>
       )}
 
+      {/* Join Project Modal */}
+      {showJoinModal && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
+          <div className="card" style={{ width: '100%', maxWidth: 520 }}>
+            <h3 style={{ marginTop: 0 }}>Join Project</h3>
+            {error && <div style={{ color: '#b00020', background: '#ffe8e8', padding: 8, borderRadius: 6 }}>{error}</div>}
+            <form onSubmit={handleJoinProject}>
+              <label>Project ID or Invitation Link</label>
+              <input value={joinCode} onChange={(e)=>setJoinCode(e.target.value)} required style={{ width: '100%', padding: 10, borderRadius: 8, border: '1px solid #E5E7EB', margin: '6px 0 12px' }} />
+              <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+                <button type="button" className="btn" style={{ background: '#6B7280' }} onClick={()=>setShowJoinModal(false)}>Cancel</button>
+                <button type="submit" className="btn">Join</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
       {/* Toast */}
+      {/* Personal Sticky Note (floating) */}
+      <div style={{ position: 'fixed', right: 20, bottom: 90, width: 320, maxWidth: 'calc(100% - 40px)' }}>
+        <div className="card" style={{ padding: 12, borderRadius: 12 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <strong>Personal Note</strong>
+            <button className="btn" style={{ padding: '6px 8px', fontSize: 12 }} onClick={() => savePersonalNote(personalNote)}>Save</button>
+          </div>
+          <textarea
+            value={personalNote}
+            onChange={(e) => setPersonalNote(e.target.value)}
+            placeholder="Jot down quick thoughts..."
+            rows={6}
+            style={{ width: '100%', marginTop: 8, padding: 8, borderRadius: 8, border: '1px solid #E5E7EB' }}
+          />
+        </div>
+      </div>
       {toast && (
         <div style={{ position: 'fixed', bottom: 16, left: '50%', transform: 'translateX(-50%)', background: colors.teal, color: 'white', padding: '10px 16px', borderRadius: 8 }}>{toast}</div>
       )}
