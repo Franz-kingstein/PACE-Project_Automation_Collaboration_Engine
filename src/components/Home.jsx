@@ -6,15 +6,16 @@ import {
   query,
   where,
   onSnapshot,
-  orderBy,
   addDoc,
   updateDoc,
   doc,
   getDoc,
+  getDocs,
   setDoc,
   arrayUnion,
   serverTimestamp,
   deleteField,
+  getCountFromServer,
 } from 'firebase/firestore';
 import { Bar } from 'react-chartjs-2';
 import {
@@ -29,6 +30,43 @@ import {
 import { auth, db } from '../firebase';
 
 ChartJS.register(CategoryScale, LinearScale, BarElement, ChartTitle, Tooltip, Legend);
+
+// ============ Helper to calculate counts from tasks array ============
+function calculateTaskCounts(tasksArray) {
+  let toDoCount = 0;
+  let inProgressCount = 0;
+  let completedTodayCount = 0;
+  const today = new Date();
+
+  const toDate = (val) => {
+    if (!val) return null;
+    if (typeof val.toDate === 'function') return val.toDate();
+    if (val.seconds) return new Date(val.seconds * 1000);
+    const n = new Date(val);
+    return isNaN(n.getTime()) ? null : n;
+  };
+
+  tasksArray.forEach((t) => {
+    const status = normalizeStatus(t?.status);
+    const completed = status === 'done';
+
+    // Only count pending "to do" and "in progress" tasks
+    if (!completed) {
+      if (status === 'to do') toDoCount++;
+      else if (status === 'in progress') inProgressCount++;
+    }
+
+    // Completed today (only if status is 'done' AND has completedAt timestamp)
+    if (completed && t.completedAt) {
+      const completedDate = toDate(t.completedAt);
+      if (completedDate && isSameDay(completedDate, today)) completedTodayCount++;
+    }
+  });
+
+  // Minimal logging for debugging
+  console.log('[calculateTaskCounts] counts ->', { toDoCount, inProgressCount, completedTodayCount, total: tasksArray.length });
+  return { toDoCount, inProgressCount, completedTodayCount };
+}
 
 const colors = {
   teal: '#21808D',
@@ -52,12 +90,34 @@ function isSameDay(a, b) {
   return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
 }
 
+// Normalize various timestamp shapes (Firestore Timestamp, {seconds}, ISO/string)
+function parseTimestamp(val) {
+  if (!val) return null;
+  if (typeof val.toDate === 'function') return val.toDate();
+  if (val.seconds) return new Date(val.seconds * 1000);
+  const d = new Date(val);
+  return isNaN(d.getTime()) ? null : d;
+}
+
 function normalizeStatus(s) {
   if (!s) return '';
-  const t = String(s).toLowerCase();
-  if (t.includes('in progress') || t.replace(/\s+/g,'') === 'inprogress') return 'in progress';
-  if (t.includes('to do') || t.replace(/\s+/g,'') === 'todo') return 'to do';
-  if (t.includes('done') || t.includes('complete')) return 'done';
+  const t = String(s).toLowerCase().trim();
+  
+  // Check for "in progress" variations
+  if (t.includes('in progress') || t.includes('inprogress') || t === 'in progress') {
+    return 'in progress';
+  }
+  
+  // Check for "to do" variations
+  if (t.includes('to do') || t.includes('todo') || t === 'to do') {
+    return 'to do';
+  }
+  
+  // Check for "done" variations
+  if (t.includes('done') || t.includes('complete')) {
+    return 'done';
+  }
+  
   return t;
 }
 
@@ -82,6 +142,9 @@ const Badge = ({ children, color = colors.teal }) => (
   }}>{children}</span>
 );
 
+// Standardized completion logic - ONLY based on status field
+const isTaskCompleted = (t) => normalizeStatus(t?.status) === 'done';
+
 const Home = () => {
   const navigate = useNavigate();
   const [user, setUser] = useState(null);
@@ -93,7 +156,14 @@ const Home = () => {
 
   // Tasks
   const [tasks, setTasks] = useState([]);
-  const [activeTab, setActiveTab] = useState('all');
+  const [tasksLoaded, setTasksLoaded] = useState(false);
+  // Default to showing only pending tasks
+  const [activeTab, setActiveTab] = useState('pending');
+
+  // Server-side counts
+  const [toDoCount, setToDoCount] = useState(0);
+  const [inProgressCount, setInProgressCount] = useState(0);
+  const [completedToday, setCompletedToday] = useState(0);
 
   // UI
   const [showProjectModal, setShowProjectModal] = useState(false);
@@ -149,6 +219,46 @@ const Home = () => {
   return () => { unsub1(); unsub2(); unsubUser && unsubUser(); };
   }, [user]);
 
+  // Backfill project task counts (taskTotal/taskDone) so progress shows immediately on Home
+  useEffect(() => {
+    if (!projects || projects.length === 0) return;
+    // For any project missing counts, compute using Firestore aggregation counts
+    const tasksCol = collection(db, 'tasks');
+    projects.forEach(async (p) => {
+      if (typeof p.taskTotal === 'number' && typeof p.taskDone === 'number') {
+        console.log(`[Home] Project "${p.name}" already has counts:`, p.taskTotal, 'total,', p.taskDone, 'done');
+        return;
+      }
+      try {
+        console.log(`[Home] Backfilling counts for project "${p.name}" (${p.id})...`);
+        const baseQ = query(tasksCol, where('projectId', '==', p.id));
+        const totalSnap = await getCountFromServer(baseQ);
+        
+        // Count completed tasks: ONLY those with status='done'
+        const allTasksSnap = await getDocs(baseQ);
+        let doneCount = 0;
+        let taskDetails = [];
+        allTasksSnap.forEach(doc => {
+          const t = doc.data();
+          const completed = normalizeStatus(t.status) === 'done';
+          taskDetails.push({ title: t.title, status: t.status, completed });
+          if (completed) doneCount++;
+        });
+        
+        console.log(`[Home] Project "${p.name}" backfill results:`, totalSnap.data().count, 'total,', doneCount, 'done');
+        console.table(taskDetails);
+        
+        await updateDoc(doc(db, 'projects', p.id), {
+          taskTotal: totalSnap.data().count || 0,
+          taskDone: doneCount,
+          updatedAt: serverTimestamp(),
+        });
+      } catch (err) {
+        console.error(`[Home] Backfill error for project "${p.name}":`, err);
+      }
+    });
+  }, [projects]);
+
   // Backfill: ensure tasks with status done have completedAt set
   useEffect(() => {
     const toBackfill = tasks.filter(t => normalizeStatus(t.status) === 'done' && !t.completedAt);
@@ -166,56 +276,79 @@ const Home = () => {
   // Listen to tasks assigned to user across projects (supports assigneeId, assigneeEmail, and legacy assignee)
   useEffect(() => {
     if (!user) return;
+    console.log('[Home] Setting up task listeners for user:', { uid: user.uid, email: user.email });
     const tasksCol = collection(db, 'tasks');
-    const qById = query(tasksCol, where('assigneeId', '==', user.uid || ''), orderBy('dueDate', 'asc'));
-    const qByEmail = query(tasksCol, where('assigneeEmail', '==', user.email || ''), orderBy('dueDate', 'asc'));
-    const qLegacy = query(tasksCol, where('assignee', '==', user.email || ''), orderBy('dueDate', 'asc'));
+    // Remove orderBy to avoid index requirement; sort client-side instead
+    const qById = query(tasksCol, where('assigneeId', '==', user.uid || ''));
+    const qByEmail = query(tasksCol, where('assigneeEmail', '==', user.email || ''));
+    const qLegacy = query(tasksCol, where('assignee', '==', user.email || ''));
     const seen = new Map();
-    const mergeAndSet = () => setTasks(Array.from(seen.values()).sort((a, b) => {
-      const ad = a.dueDate ? (a.dueDate.seconds ? a.dueDate.seconds * 1000 : a.dueDate) : Infinity;
-      const bd = b.dueDate ? (b.dueDate.seconds ? b.dueDate.seconds * 1000 : b.dueDate) : Infinity;
-      return ad - bd;
-    }));
+    let loadCount = 0;
+    const mergeAndSet = () => {
+      const sorted = Array.from(seen.values()).sort((a, b) => {
+        const ad = a.dueDate ? (a.dueDate.seconds ? a.dueDate.seconds * 1000 : a.dueDate) : Infinity;
+        const bd = b.dueDate ? (b.dueDate.seconds ? b.dueDate.seconds * 1000 : b.dueDate) : Infinity;
+        return ad - bd;
+      });
+      console.log('[Home] Tasks merged:', sorted.length, 'Unique task IDs:', seen.size);
+      console.log('[Home] ALL TASK STATUSES FROM DB:', sorted.map(t => ({ title: t.title, rawStatus: t.status, normalized: normalizeStatus(t.status), completed: isTaskCompleted(t) })));
+      sorted.forEach(t => {
+        console.log('[Home] Task:', t.title, '| Status:', t.status, '| Completed:', isTaskCompleted(t), '| AssigneeId:', t.assigneeId, '| AssigneeEmail:', t.assigneeEmail, '| Project:', t.projectId);
+      });
+      setTasks(sorted);
+    };
     const unsub1 = onSnapshot(qById, (snap) => {
       snap.docChanges().forEach((ch) => {
         if (ch.type === 'removed') seen.delete(ch.doc.id);
         else seen.set(ch.doc.id, { id: ch.doc.id, ...ch.doc.data() });
       });
       mergeAndSet();
-    }, (e) => setError(e.message));
+      loadCount++;
+      if (loadCount >= 3) setTasksLoaded(true);
+    }, (e) => { setError(e.message); setTasksLoaded(true); });
     const unsub2 = onSnapshot(qByEmail, (snap) => {
       snap.docChanges().forEach((ch) => {
         if (ch.type === 'removed') seen.delete(ch.doc.id);
         else seen.set(ch.doc.id, { id: ch.doc.id, ...ch.doc.data() });
       });
       mergeAndSet();
-    }, (e) => setError(e.message));
+      loadCount++;
+      if (loadCount >= 3) setTasksLoaded(true);
+    }, (e) => { setError(e.message); setTasksLoaded(true); });
     const unsub3 = onSnapshot(qLegacy, (snap) => {
       snap.docChanges().forEach((ch) => {
         if (ch.type === 'removed') seen.delete(ch.doc.id);
         else seen.set(ch.doc.id, { id: ch.doc.id, ...ch.doc.data() });
       });
       mergeAndSet();
-    }, (e) => setError(e.message));
+      loadCount++;
+      if (loadCount >= 3) setTasksLoaded(true);
+    }, (e) => { setError(e.message); setTasksLoaded(true); });
     return () => { unsub1(); unsub2(); unsub3(); };
   }, [user]);
 
-  const toDoCount = useMemo(() => tasks.filter(t => normalizeStatus(t.status) === 'to do').length, [tasks]);
-  const inProgressCount = useMemo(() => tasks.filter(t => normalizeStatus(t.status) === 'in progress').length, [tasks]);
-  const completedToday = useMemo(() => {
-    const today = new Date();
-    const isCompletedToday = (t) => {
-      const ts = t.completedAt ? new Date(t.completedAt.seconds ? t.completedAt.seconds * 1000 : t.completedAt) : (t.completedAtClient ? new Date(t.completedAtClient) : null);
-      return ts ? isSameDay(ts, today) : false;
-    };
-    return tasks.filter(isCompletedToday).length;
+  // Update server-side counts when tasks change
+  useEffect(() => {
+    if (tasks.length === 0) {
+      setToDoCount(0);
+      setInProgressCount(0);
+      setCompletedToday(0);
+      return;
+    }
+    
+    const counts = calculateTaskCounts(tasks);
+    setToDoCount(counts.toDoCount);
+    setInProgressCount(counts.inProgressCount);
+    setCompletedToday(counts.completedTodayCount);
   }, [tasks]);
 
+  const hasPending = useMemo(() => tasks.some(t => !isTaskCompleted(t)), [tasks]);
+  
   const weekMessageCount = useMemo(() => {
     const now = new Date();
     const start = new Date(now);
     start.setDate(now.getDate() - 7);
-    return tasks.filter(t => t.completedAt && new Date(t.completedAt.seconds ? t.completedAt.seconds * 1000 : t.completedAt) >= start).length;
+  return tasks.filter(t => t.completedAt && parseTimestamp(t.completedAt) >= start).length;
   }, [tasks]);
 
   // Project progress map by projectId
@@ -225,41 +358,58 @@ const Home = () => {
       const pid = t.projectId || 'unknown';
       if (!map[pid]) map[pid] = { total: 0, done: 0 };
       map[pid].total += 1;
-      if (normalizeStatus(t.status) === 'done') map[pid].done += 1;
+      if (isTaskCompleted(t)) map[pid].done += 1;
     }
     return map;
   }, [tasks]);
 
-  // My Tasks tab filtering
+  // My Tasks tab filtering - show only pending by default; if none pending, show completed as fallback
   const filteredTasks = useMemo(() => {
     const now = new Date();
     const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
     const endOfWeek = new Date(startOfToday);
     endOfWeek.setDate(startOfToday.getDate() + 7);
 
+  // Helper shorthands
+  const isPending = (t) => !isTaskCompleted(t);
+  const isDone = (t) => isTaskCompleted(t);
+
     let list = [...tasks];
-    if (activeTab === 'today') {
-      list = list.filter(t => t.dueDate && isSameDay(new Date(t.dueDate.seconds ? t.dueDate.seconds * 1000 : t.dueDate), startOfToday));
+    console.log('[Home] Filtering tasks. Active tab:', activeTab, 'Total tasks:', list.length);
+    
+    if (activeTab === 'pending') {
+      const pending = list.filter(isPending);
+      console.log('[Home] Pending tasks:', pending.length);
+      list = pending.length ? pending : list.filter(isDone); // fallback to completed when no pending
+    } else if (activeTab === 'today') {
+      list = list.filter(t => t.dueDate && isSameDay(parseTimestamp(t.dueDate), startOfToday) && isPending(t));
     } else if (activeTab === 'week') {
       list = list.filter(t => t.dueDate) // due within next 7 days
                  .filter(t => {
-                   const d = new Date(t.dueDate.seconds ? t.dueDate.seconds * 1000 : t.dueDate);
-                   return d >= startOfToday && d < endOfWeek;
-                 });
+                   const d = parseTimestamp(t.dueDate);
+                   return d && d >= startOfToday && d < endOfWeek;
+                 })
+                 .filter(isPending);
     } else if (activeTab === 'inprogress') {
-      list = list.filter(t => normalizeStatus(t.status) === 'in progress');
+      list = list.filter(t => normalizeStatus(t.status) === 'in progress' && isPending(t));
     } else if (activeTab === 'overdue') {
-      list = list.filter(t => t.dueDate && new Date(t.dueDate.seconds ? t.dueDate.seconds * 1000 : t.dueDate) < startOfToday && normalizeStatus(t.status) !== 'done');
+      list = list.filter(t => t.dueDate && parseTimestamp(t.dueDate) < startOfToday && isPending(t));
+    } else {
+      // Unknown tab -> default to pending
+      const pending = list.filter(isPending);
+      list = pending.length ? pending : list.filter(isDone);
     }
 
     // sort by due date
     list.sort((a, b) => {
-      const ad = a.dueDate ? (a.dueDate.seconds ? a.dueDate.seconds * 1000 : a.dueDate) : Infinity;
-      const bd = b.dueDate ? (b.dueDate.seconds ? b.dueDate.seconds * 1000 : b.dueDate) : Infinity;
+      const ad = parseTimestamp(a.dueDate) ? parseTimestamp(a.dueDate).getTime() : Infinity;
+      const bd = parseTimestamp(b.dueDate) ? parseTimestamp(b.dueDate).getTime() : Infinity;
       return ad - bd;
     });
 
-    return list.slice(0, 10);
+    console.log('[Home] Filtered tasks for display:', list.length);
+    // Show all tasks, not just 10 (removed slice limit for better visibility)
+    return list;
   }, [tasks, activeTab]);
 
   // Weekly chart data (last 7 days)
@@ -271,11 +421,10 @@ const Home = () => {
     start.setDate(now.getDate() - 6); // include today
 
     tasks.forEach(t => {
-      const d = t.completedAt
-        ? new Date(t.completedAt.seconds ? t.completedAt.seconds * 1000 : t.completedAt)
-        : (t.completedAtClient ? new Date(t.completedAtClient) : null);
-      if (d && d >= start) {
-        counts[d.getDay()] += 1;
+      // Only count tasks that are actually completed (status = 'done') AND have completedAt
+      if (normalizeStatus(t.status) === 'done' && t.completedAt) {
+        const d = parseTimestamp(t.completedAt);
+        if (d && d >= start) counts[d.getDay()] += 1;
       }
     });
 
@@ -359,6 +508,7 @@ const Home = () => {
       await updateDoc(doc(db, 'tasks', task.id), payload);
       setToast(isDone ? 'Task set to To Do' : 'Task marked as complete');
       setTimeout(() => setToast(''), 1500);
+      // Counts will automatically update when tasks listener fires
     } catch (e) {
       setError(e.message);
     }
@@ -401,10 +551,15 @@ const Home = () => {
   if (!user) return null;
 
   // Derived helper for project progress
-  const getProjectProgress = (projectId) => {
-    const p = projectProgress[projectId] || { total: 0, done: 0 };
-    const pct = p.total ? Math.round((p.done / p.total) * 100) : 0;
-    return { ...p, pct };
+  const getProjectProgress = (project) => {
+    // Prefer counts stored on the project doc (taskTotal/taskDone) for instant display
+    const totalFromProject = typeof project.taskTotal === 'number' ? project.taskTotal : undefined;
+    const doneFromProject = typeof project.taskDone === 'number' ? project.taskDone : undefined;
+    const fallback = projectProgress[project.id] || { total: 0, done: 0 };
+    const total = totalFromProject ?? fallback.total;
+    const done = doneFromProject ?? fallback.done;
+    const pct = total ? Math.round((done / total) * 100) : 0;
+    return { total, done, pct };
   };
 
   const todayStr = new Date().toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' });
@@ -470,7 +625,7 @@ const Home = () => {
         marginBottom: 24
       }}>
         {projects.map((p) => {
-          const prog = getProjectProgress(p.id);
+          const prog = getProjectProgress(p);
           return (
             <div key={p.id} className="card" style={{ border: '1px solid #eee', borderRadius: 12, transition: 'box-shadow .2s, transform .2s', cursor: 'pointer' }} onClick={() => navigate(`/project/${p.id}`)} onMouseEnter={(e)=>{e.currentTarget.style.boxShadow='0 8px 24px rgba(0,0,0,0.12)'; e.currentTarget.style.transform='translateY(-2px)';}} onMouseLeave={(e)=>{e.currentTarget.style.boxShadow='var(--shadow)'; e.currentTarget.style.transform='translateY(0)';}}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -480,10 +635,12 @@ const Home = () => {
               <div style={{ color: '#6B7280', marginTop: 6 }}>{p.description}</div>
               <div style={{ marginTop: 8, fontSize: 12, color: '#6B7280' }}>Owner: {p.ownerName || p.ownerEmail}</div>
               <div style={{ marginTop: 10 }}>
-                <div style={{ height: 8, background: '#F3F4F6', borderRadius: 999 }}>
-                  <div style={{ width: `${prog.pct}%`, height: '100%', background: colors.teal, borderRadius: 999 }} />
+                <div style={{ height: 8, background: '#F3F4F6', borderRadius: 999, overflow: 'hidden', position: 'relative' }}>
+                  <div style={{ width: `${prog.pct}%`, height: '100%', background: colors.teal, borderRadius: 999, transition: 'width .3s ease' }} />
                 </div>
-                <div style={{ fontSize: 12, color: '#6B7280', marginTop: 6 }}>{prog.done}/{prog.total} tasks · {prog.pct}% complete</div>
+                <div style={{ fontSize: 12, color: '#6B7280', marginTop: 6 }}>
+                  {prog.total === 0 && (typeof p.taskTotal !== 'number') ? 'Calculating…' : `${prog.done}/${prog.total} tasks · ${prog.pct}% complete`}
+                </div>
               </div>
               <div style={{ marginTop: 8, fontSize: 12, color: '#6B7280' }}>Last updated: {p.updatedAt?.toDate ? p.updatedAt.toDate().toLocaleString() : (p.updatedAt ? formatDate(p.updatedAt) : '—')}</div>
               <div style={{ marginTop: 12 }}>
@@ -506,9 +663,9 @@ const Home = () => {
       }}>
         {/* My Tasks List */}
         <div className="card" style={{ borderRadius: 12, border: '1px solid #eee' }}>
-          <div style={{ display: 'flex', gap: 12, marginBottom: 12, borderBottom: '1px solid #F3F4F6', paddingBottom: 8 }}>
+          <div style={{ display: 'flex', gap: 12, marginBottom: 12, borderBottom: '1px solid #F3F4F6', paddingBottom: 8, alignItems: 'center' }}>
             {[
-              { key: 'all', label: 'All Tasks' },
+              { key: 'pending', label: 'Pending' },
               { key: 'today', label: 'Today' },
               { key: 'week', label: 'This Week' },
               { key: 'inprogress', label: 'In Progress' },
@@ -521,17 +678,24 @@ const Home = () => {
                 padding: '6px 10px', borderRadius: 999, cursor: 'pointer'
               }}>{t.label}</button>
             ))}
+            <div style={{ fontSize: 12, color: '#6B7280', marginLeft: 8 }}>
+              ({filteredTasks.length} of {tasks.length} tasks)
+            </div>
             <div style={{ marginLeft: 'auto' }}>
               <button className="btn" style={{ background: '#1a6b7a' }} onClick={() => navigate('/tasks')}>View All</button>
             </div>
           </div>
 
-          {filteredTasks.length === 0 ? (
+          {!tasksLoaded ? (
+            <div style={{ color: '#6B7280' }}>Loading tasks…</div>
+          ) : activeTab === 'pending' && !hasPending && tasks.length > 0 ? (
+            <div style={{ color: '#6B7280' }}>All tasks are completed 🎉</div>
+          ) : filteredTasks.length === 0 ? (
             <div style={{ color: '#6B7280' }}>No pending tasks - You're all caught up! 🎉</div>
           ) : (
             <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
               {filteredTasks.map(task => {
-                const due = task.dueDate ? new Date(task.dueDate.seconds ? task.dueDate.seconds * 1000 : task.dueDate) : null;
+                const due = task.dueDate ? parseTimestamp(task.dueDate) : null;
                 const today = new Date();
                 let dueColor = colors.green;
                 if (due) {
@@ -544,7 +708,11 @@ const Home = () => {
                 const priorityColor = priority === 'high' ? '#EF4444' : priority === 'medium' ? '#F59E0B' : '#10B981';
                 return (
                   <li key={task.id} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 0', borderBottom: '1px solid #F3F4F6' }}>
-                    <input type="checkbox" checked={normalizeStatus(task.status) === 'done' || !!task.completedAt || !!task.completedAtClient} onChange={() => markTaskComplete(task)} />
+                    <input 
+                      type="checkbox" 
+                      checked={normalizeStatus(task.status) === 'done'} 
+                      onChange={() => markTaskComplete(task)} 
+                    />
                     <div style={{ flex: 1 }}>
                       <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                         <span style={{ width: 8, height: 8, borderRadius: 999, background: priorityColor, display: 'inline-block' }} />

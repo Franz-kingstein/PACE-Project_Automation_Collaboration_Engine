@@ -3,7 +3,7 @@ import { DndContext, closestCenter, KeyboardSensor, PointerSensor, useSensor, us
 import { SortableContext, sortableKeyboardCoordinates, verticalListSortingStrategy } from '@dnd-kit/sortable';
 import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import { collection, addDoc, onSnapshot, updateDoc, doc, query, where, serverTimestamp, Timestamp, deleteField, onSnapshot as onDocSnapshot } from 'firebase/firestore';
+import { collection, addDoc, onSnapshot, updateDoc, doc, query, where, serverTimestamp, Timestamp, deleteField, increment, onSnapshot as onDocSnapshot } from 'firebase/firestore';
 import { db } from '../firebase';
 
 function normalizeStatus(s) {
@@ -168,6 +168,15 @@ const TaskBoard = ({ projectId }) => {
         ...(projectId ? { projectId, projectName: projectMeta?.name || '' } : {})
       };
       await addDoc(collection(db, 'tasks'), payload);
+      // Update project counters for immediate Home progress
+      if (projectId) {
+        try {
+          await updateDoc(doc(db, 'projects', projectId), {
+            taskTotal: increment(1),
+            updatedAt: serverTimestamp(),
+          });
+        } catch {}
+      }
       setNewTask({ title: '', assignee: '', priority: 'low', dueDate: '', status: 'to do' });
       setSelectedAssignee(null);
     }
@@ -178,14 +187,19 @@ const TaskBoard = ({ projectId }) => {
     if (!over) return;
 
     const taskId = active.id;
-  const overId = typeof over.id === 'string' ? over.id : '';
-  const normalized = normalizeStatus(overId);
-  if (!normalized) return;
-  await updateStatus(taskId, normalized);
+    // When dropping over a task card, use its containerId (column id). Otherwise use the droppable id directly.
+    const containerId = over?.data?.current?.sortable?.containerId;
+    const targetId = containerId || (typeof over.id === 'string' ? over.id : '');
+    const normalized = normalizeStatus(targetId);
+    const allowed = ['to do', 'in progress', 'done'];
+    if (!allowed.includes(normalized)) return; // ignore accidental drops not over a column
+    await updateStatus(taskId, normalized);
   };
 
   const updateStatus = async (taskId, status) => {
     const normalized = normalizeStatus(status);
+    const allowed = ['to do', 'in progress', 'done'];
+    if (!allowed.includes(normalized)) return; // safety guard
     const payload = { status: normalized };
     const clientTimestamp = new Date();
     if (normalized === 'done') {
@@ -197,6 +211,19 @@ const TaskBoard = ({ projectId }) => {
     }
     // Write to Firestore first
     await updateDoc(doc(db, 'tasks', taskId), payload);
+    // If part of a project, adjust counters when moving into or out of 'done'
+    if (projectId) {
+      try {
+        const projectRef = doc(db, 'projects', projectId);
+        const prev = tasks.find((t) => t.id === taskId);
+        const wasDone = prev && normalizeStatus(prev.status) === 'done';
+        if (!wasDone && normalized === 'done') {
+          await updateDoc(projectRef, { taskDone: increment(1), updatedAt: serverTimestamp() });
+        } else if (wasDone && normalized !== 'done') {
+          await updateDoc(projectRef, { taskDone: increment(-1), updatedAt: serverTimestamp() });
+        }
+      } catch {}
+    }
     // Then update local state with client timestamp for instant UI feedback
     setTasks(prev => prev.map(t => t.id === taskId ? { 
       ...t, 
@@ -277,7 +304,7 @@ const TaskBoard = ({ projectId }) => {
         <div className="kanban-board" style={{ display: 'flex', gap: '20px', justifyContent: 'space-around' }}>
           {Object.entries(columns).map(([status, columnTasks]) => (
             <Column key={status} id={status} title={status}>
-              <SortableContext items={columnTasks.map(task => task.id)} strategy={verticalListSortingStrategy}>
+              <SortableContext id={status} items={columnTasks.map(task => task.id)} strategy={verticalListSortingStrategy}>
                 {columnTasks.map(task => (
                   <TaskCard key={`${task.id}-${normalizeStatus(task.status)}`} task={task} onUpdateStatus={updateStatus} />
                 ))}

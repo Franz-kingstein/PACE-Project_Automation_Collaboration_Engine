@@ -47,7 +47,7 @@ const Navbar = () => {
         <div style={{ display: 'grid', gap: 4, padding: 12 }}>
           <button onClick={() => go('/home')} style={{ ...linkStyle, textAlign: 'left', background: isActive('/home') ? 'rgba(255,255,255,0.2)' : 'transparent' }}>Home</button>
           <button onClick={() => go('/tasks')} style={{ ...linkStyle, textAlign: 'left', background: isActive('/tasks') ? 'rgba(255,255,255,0.2)' : 'transparent' }}>My Tasks</button>
-          <button onClick={() => go('/home#projects')} style={{ ...linkStyle, textAlign: 'left' }}>Projects</button>
+          {/* <button onClick={() => go('/home#projects')} style={{ ...linkStyle, textAlign: 'left' }}>Projects</button> */}
           <button onClick={() => go('/chat')} style={{ ...linkStyle, textAlign: 'left', background: isActive('/chat') ? 'rgba(255,255,255,0.2)' : 'transparent' }}>Chat</button>
           <button onClick={() => go('/bugs')} style={{ ...linkStyle, textAlign: 'left', background: isActive('/bugs') ? 'rgba(255,255,255,0.2)' : 'transparent' }}>Bugs</button>
         </div>
