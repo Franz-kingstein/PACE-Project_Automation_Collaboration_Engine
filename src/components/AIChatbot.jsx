@@ -1,14 +1,32 @@
-import React, { useState } from 'react';
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import React, { useEffect, useState } from 'react';
 
-const API_KEY = 'AIzaSyCHEEIw_T8n2G4gOS0Zc3tqPQpdTAuv5FQ';
-const genAI = new GoogleGenerativeAI(API_KEY);
+// Prefer environment configuration; optionally support a simple HTTP proxy if provided
+const CHAT_API_URL = process.env.REACT_APP_CHAT_API_URL; // Optional custom backend proxy
+let QWEN_API_KEY = process.env.REACT_APP_QWEN_API_KEY;
+// Dev-friendly fallback: allow setting a temporary key at runtime
+if (!QWEN_API_KEY) {
+  try {
+    const fromWindow = typeof window !== 'undefined' && (window.PACE_QWEN_API_KEY);
+    const fromStorage = typeof window !== 'undefined' && window.localStorage && window.localStorage.getItem('PACE_QWEN_API_KEY');
+    QWEN_API_KEY = fromWindow || fromStorage || QWEN_API_KEY;
+  } catch {}
+}
 
 const AIChatbot = () => {
   const [isOpen, setIsOpen] = useState(false);
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
   const [isTyping, setIsTyping] = useState(false);
+
+  // Dev-time diagnostics to confirm env wiring (does not print secrets)
+  useEffect(() => {
+    /* eslint-disable no-console */
+    console.log('PACE Chatbot config:', {
+  provider: 'qwen',
+  hasQwenKey: Boolean(QWEN_API_KEY),
+      hasProxyUrl: Boolean(CHAT_API_URL),
+    });
+  }, []);
 
   const sendMessage = async () => {
     if (!input.trim()) return;
@@ -19,25 +37,85 @@ const AIChatbot = () => {
     setIsTyping(true);
 
     try {
-      const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
-      const prompt = `You are a helpful AI assistant for project management in the PACE app. Answer questions about project management, suggest task assignments, and provide advice on productivity. User message: ${input}`;
-      const result = await model.generateContent(prompt);
-      const response = await result.response;
-      const botMessage = { role: 'bot', text: response.text() };
+      let answer = '';
+
+      // Option A: Use custom backend if provided
+      if (CHAT_API_URL) {
+        try {
+          const resp = await fetch(CHAT_API_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              prompt: input,
+              system: 'You are a helpful AI assistant for project management in the PACE app. Answer with concise, practical guidance.',
+            }),
+          });
+          if (!resp.ok) {
+            let body = '';
+            try { body = await resp.text(); } catch {}
+            throw new Error(`HTTP ${resp.status}${body ? ` - ${body.slice(0,200)}` : ''}`);
+          }
+          const data = await resp.json();
+          answer = data.text || data.answer || '';
+        } catch (proxyErr) {
+      console.warn('Proxy call failed:', proxyErr);
+      // Do not fall back to direct browser call when proxy is configured
+      throw proxyErr;
+        }
+      }
+
+      // Option B: Direct Qwen call (browser). Requires REACT_APP_QWEN_API_KEY.
+  if (!answer && QWEN_API_KEY && !CHAT_API_URL) {
+        const endpoint = 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions';
+        const models = ['qwen2.5', 'qwen2.5-mini', 'qwen-plus', 'qwen-turbo'];
+        const messagesBody = [
+          { role: 'system', content: 'You are a helpful AI assistant for project management in the PACE app. Keep replies short and actionable.' },
+          { role: 'user', content: input }
+        ];
+        let lastErr = null;
+        for (const model of models) {
+          try {
+            const resp = await fetch(endpoint, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${QWEN_API_KEY}`,
+              },
+              body: JSON.stringify({ model, messages: messagesBody, temperature: 0.7 })
+            });
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            const data = await resp.json();
+            answer = data?.choices?.[0]?.message?.content || data?.choices?.[0]?.text || '';
+            if (answer) break;
+          } catch (e) {
+            lastErr = e;
+          }
+        }
+        if (!answer && lastErr) throw lastErr;
+      }
+
+      if (!answer) {
+        throw new Error('No answer produced. Check API key or backend URL.');
+      }
+
+      const botMessage = { role: 'bot', text: answer };
       setMessages(prev => [...prev, botMessage]);
     } catch (error) {
-      console.error('Error generating response:', error);
-      const errorMessage = { role: 'bot', text: 'Sorry, I encountered an error. Please try again.' };
+      console.error('Chatbot error:', error);
+      let hint = '';
+      if (!QWEN_API_KEY && !CHAT_API_URL) {
+        hint = ' Missing API configuration. Set REACT_APP_QWEN_API_KEY or REACT_APP_CHAT_API_URL.';
+      }
+      const detail = error?.message ? `\nDetails: ${String(error.message).slice(0, 180)}` : '';
+      const errorMessage = { role: 'bot', text: `Sorry, I encountered an error. Please try again.${hint}${detail}` };
       setMessages(prev => [...prev, errorMessage]);
     } finally {
       setIsTyping(false);
     }
   };
 
-  const handleKeyPress = (e) => {
-    if (e.key === 'Enter') {
-      sendMessage();
-    }
+  const handleKeyDown = (e) => {
+    if (e.key === 'Enter') sendMessage();
   };
 
   return (
@@ -138,7 +216,7 @@ const AIChatbot = () => {
               type="text"
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              onKeyPress={handleKeyPress}
+              onKeyDown={handleKeyDown}
               placeholder="Ask me about project management..."
               style={{
                 flex: 1,

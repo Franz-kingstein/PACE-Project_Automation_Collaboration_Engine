@@ -29,9 +29,17 @@ const TaskCard = ({ task, onUpdateStatus }) => {
     low: 'green'
   };
 
-  const handleCheckboxChange = async () => {
-    const newStatus = normalizeStatus(task.status) === 'done' ? 'to do' : 'done';
-    await onUpdateStatus(task.id, newStatus);
+  const handleCheckboxChange = async (e) => {
+    // Prevent drag listeners from hijacking the click/change
+    try { e.stopPropagation(); } catch {}
+    // If checked, always mark as Done (move card to Done column)
+    if (e?.target?.checked) {
+      await onUpdateStatus(task.id, 'done');
+    } else {
+      // If unchecked, revert to the previous status when available, else fall back to 'to do'
+      const fallback = normalizeStatus(task.prevStatus) || 'to do';
+      await onUpdateStatus(task.id, fallback);
+    }
   };
 
   return (
@@ -57,14 +65,31 @@ const TaskCard = ({ task, onUpdateStatus }) => {
       <p>Due: {task.dueDate?.seconds ? new Date(task.dueDate.seconds * 1000).toLocaleDateString() : (task.dueDate || '')}</p>
       <div style={{ margin: '8px 0' }}>
         <label style={{ fontSize: 12, marginRight: 8 }}>Status:</label>
-        <select value={normalizeStatus(task.status)} onChange={(e) => onUpdateStatus(task.id, e.target.value)}>
+        <select
+          value={normalizeStatus(task.status)}
+          onChange={(e) => onUpdateStatus(task.id, e.target.value)}
+          onPointerDown={(e) => e.stopPropagation()}
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={(e) => e.stopPropagation()}
+        >
           <option value="to do">To Do</option>
           <option value="in progress">In Progress</option>
           <option value="done">Done</option>
         </select>
       </div>
-      <label>
-        <input type="checkbox" checked={normalizeStatus(task.status) === 'done'} onChange={handleCheckboxChange} />
+      <label
+        onPointerDown={(e) => e.stopPropagation()}
+        onMouseDown={(e) => e.stopPropagation()}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <input
+          type="checkbox"
+          checked={normalizeStatus(task.status) === 'done'}
+          onChange={handleCheckboxChange}
+          onPointerDown={(e) => e.stopPropagation()}
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={(e) => e.stopPropagation()}
+        />
         Completed
       </label>
     </div>
@@ -99,7 +124,9 @@ const TaskBoard = ({ projectId }) => {
   const [projectMeta, setProjectMeta] = useState(null);
 
   const sensors = useSensors(
-    useSensor(PointerSensor),
+    useSensor(PointerSensor, {
+      activationConstraint: { distance: 5 } // require slight movement to start drag so clicks work
+    }),
     useSensor(KeyboardSensor, {
       coordinateGetter: sortableKeyboardCoordinates,
     })
@@ -202,20 +229,38 @@ const TaskBoard = ({ projectId }) => {
     if (!allowed.includes(normalized)) return; // safety guard
     const payload = { status: normalized };
     const clientTimestamp = new Date();
+    // Determine previous status from current tasks state for reversible transitions
+    const prev = tasks.find((t) => t.id === taskId);
+    const prevStatus = normalizeStatus(prev?.status);
     if (normalized === 'done') {
       payload.completedAt = serverTimestamp();
       payload.completedAtClient = clientTimestamp;
+      if (prevStatus && prevStatus !== 'done') {
+        payload.prevStatus = prevStatus; // remember where it came from (to do / in progress)
+      }
     } else {
       payload.completedAt = deleteField();
       payload.completedAtClient = deleteField();
+      payload.prevStatus = deleteField();
     }
-    // Write to Firestore first
-    await updateDoc(doc(db, 'tasks', taskId), payload);
+    // Optimistic update: move in UI immediately
+    const optimistic = {
+      ...payload,
+      completedAt: normalized === 'done' ? { seconds: Math.floor(clientTimestamp.getTime() / 1000) } : null,
+    };
+    setTasks(prevList => prevList.map(t => (t.id === taskId ? { ...t, ...optimistic } : t)));
+    // Write to Firestore
+    try {
+      await updateDoc(doc(db, 'tasks', taskId), payload);
+    } catch (err) {
+      // Revert on failure
+      setTasks(prevList => prevList.map(t => (t.id === taskId ? { ...t, status: prevStatus } : t)));
+      return;
+    }
     // If part of a project, adjust counters when moving into or out of 'done'
     if (projectId) {
       try {
         const projectRef = doc(db, 'projects', projectId);
-        const prev = tasks.find((t) => t.id === taskId);
         const wasDone = prev && normalizeStatus(prev.status) === 'done';
         if (!wasDone && normalized === 'done') {
           await updateDoc(projectRef, { taskDone: increment(1), updatedAt: serverTimestamp() });
@@ -224,13 +269,7 @@ const TaskBoard = ({ projectId }) => {
         }
       } catch {}
     }
-    // Then update local state with client timestamp for instant UI feedback
-    setTasks(prev => prev.map(t => t.id === taskId ? { 
-      ...t, 
-      ...payload,
-      // Replace serverTimestamp() placeholder with client time for immediate display
-      completedAt: normalized === 'done' ? { seconds: Math.floor(clientTimestamp.getTime() / 1000) } : null
-    } : t));
+  // Local state already updated optimistically above
   };
 
   const columns = {
