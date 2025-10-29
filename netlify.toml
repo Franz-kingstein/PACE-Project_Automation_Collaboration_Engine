@@ -1,0 +1,10 @@
+[build]
+  base = "./"
+  command = "npm run build"
+  publish = "build"
+
+# Ensure SPA routes serve index.html
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200

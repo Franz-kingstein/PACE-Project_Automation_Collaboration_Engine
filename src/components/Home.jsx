@@ -656,9 +656,9 @@ const Home = () => {
       </div>
 
       {/* Section 3 + 4: Grid */}
-      <div style={{
+      <div className="dashboard-main-grid" style={{
         display: 'grid',
-        gridTemplateColumns: '3fr 2fr',
+        gridTemplateColumns: '2fr 1.5fr 1fr',
         gap: 16
       }}>
         {/* My Tasks List */}
@@ -734,11 +734,45 @@ const Home = () => {
 
         {/* Productivity Graph */}
         <div className="card" style={{ borderRadius: 12, border: '1px solid #eee' }}>
+          <h3 style={{ marginTop: 0, marginBottom: 16 }}>Weekly Activity</h3>
           {chartData.datasets[0].data.every(v => v === 0) ? (
-            <div style={{ color: '#6B7280' }}>No activity in the last 7 days yet.</div>
+            <div style={{ color: '#6B7280', textAlign: 'center', padding: 20 }}>No activity in the last 7 days yet.</div>
           ) : (
             <Bar data={chartData} options={chartOptions} />
           )}
+        </div>
+
+        {/* Personal Notes */}
+        <div className="card personal-notes-section" style={{ borderRadius: 12, border: '1px solid #eee' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+            <h3 style={{ margin: 0 }}>Personal Notes</h3>
+            <button 
+              className="btn" 
+              style={{ padding: '6px 12px', fontSize: 12 }} 
+              onClick={() => savePersonalNote(personalNote)}
+            >
+              Save
+            </button>
+          </div>
+          <textarea
+            value={personalNote}
+            onChange={(e) => setPersonalNote(e.target.value)}
+            placeholder="Jot down quick thoughts, reminders, or notes..."
+            rows={12}
+            style={{ 
+              width: '100%', 
+              padding: 12, 
+              borderRadius: 8, 
+              border: '1px solid #E5E7EB',
+              fontSize: 14,
+              lineHeight: 1.4,
+              resize: 'vertical',
+              minHeight: '200px'
+            }}
+          />
+          <div style={{ fontSize: 12, color: '#6B7280', marginTop: 8 }}>
+            💡 Notes are saved automatically when you click Save
+          </div>
         </div>
       </div>
 
@@ -783,22 +817,6 @@ const Home = () => {
       )}
 
       {/* Toast */}
-      {/* Personal Sticky Note (floating) */}
-      <div style={{ position: 'fixed', right: 20, bottom: 90, width: 320, maxWidth: 'calc(100% - 40px)' }}>
-        <div className="card" style={{ padding: 12, borderRadius: 12 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <strong>Personal Note</strong>
-            <button className="btn" style={{ padding: '6px 8px', fontSize: 12 }} onClick={() => savePersonalNote(personalNote)}>Save</button>
-          </div>
-          <textarea
-            value={personalNote}
-            onChange={(e) => setPersonalNote(e.target.value)}
-            placeholder="Jot down quick thoughts..."
-            rows={6}
-            style={{ width: '100%', marginTop: 8, padding: 8, borderRadius: 8, border: '1px solid #E5E7EB' }}
-          />
-        </div>
-      </div>
       {toast && (
         <div style={{ position: 'fixed', bottom: 16, left: '50%', transform: 'translateX(-50%)', background: colors.teal, color: 'white', padding: '10px 16px', borderRadius: 8 }}>{toast}</div>
       )}
@@ -810,6 +828,19 @@ const Home = () => {
         }
         @media (max-width: 768px) {
           .projects-grid { grid-template-columns: 1fr; }
+        }
+        @media (max-width: 1200px) {
+          .dashboard-main-grid { 
+            grid-template-columns: 1fr 1fr !important; 
+          }
+          .dashboard-main-grid .personal-notes-section {
+            grid-column: 1 / -1;
+          }
+        }
+        @media (max-width: 768px) {
+          .dashboard-main-grid { 
+            grid-template-columns: 1fr !important; 
+          }
         }
       `}</style>
     </div>
