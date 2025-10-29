@@ -1,11 +1,10 @@
 import React, { useEffect, useState } from 'react';
 import { GoogleGenAI } from '@google/genai';
 
-// TEMP: explicit API key for first-time testing. Replace with your key.
-// After testing, move this into an env var (e.g., REACT_APP_GOOGLE_API_KEY).
-const GOOGLE_API_KEY = 'AIzaSyDMkJsFXYf_2TTgoVPpi5D6y2ForJS1iKs';
+// Use environment variable for API key
+const GOOGLE_API_KEY = process.env.REACT_APP_GOOGLE_API_KEY;
 
-const ai = new GoogleGenAI({ apiKey: GOOGLE_API_KEY });
+const ai = GOOGLE_API_KEY ? new GoogleGenAI({ apiKey: GOOGLE_API_KEY }) : null;
 
 const AIChatbot = () => {
   const [isOpen, setIsOpen] = useState(false);
@@ -16,15 +15,15 @@ const AIChatbot = () => {
   useEffect(() => {
     /* eslint-disable no-console */
     console.log('PACE Chatbot (Google GenAI) config:', {
-  hasKey: Boolean(!!GOOGLE_API_KEY),
+      hasKey: Boolean(GOOGLE_API_KEY),
       model: 'gemini-2.5-flash',
     });
   }, []);
 
   const sendMessage = async () => {
     if (!input.trim()) return;
-  if (!GOOGLE_API_KEY) {
-      setMessages(prev => [...prev, { role: 'bot', text: 'Missing API key. Set GOOGLE_API_KEY in AIChatbot.jsx.' }]);
+    if (!GOOGLE_API_KEY || !ai) {
+      setMessages(prev => [...prev, { role: 'bot', text: 'AI chatbot is not configured. Please set REACT_APP_GOOGLE_API_KEY environment variable.' }]);
       return;
     }
 
