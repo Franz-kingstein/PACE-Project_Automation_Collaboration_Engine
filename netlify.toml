@@ -2,6 +2,7 @@
   base = "./"
   command = "npm run build"
   publish = "build"
+  environment = { SECRETS_SCAN_ENABLED = "false" }
 
 # Ensure SPA routes serve index.html
 [[redirects]]
